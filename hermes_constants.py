@@ -194,7 +194,7 @@ VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 def parse_reasoning_effort(effort: str) -> dict | None:
     """Parse a reasoning effort level into a config dict.
 
-    Valid levels: "none", "minimal", "low", "medium", "high", "xhigh".
+    Valid levels: "none", "auto", "minimal", "low", "medium", "high", "xhigh".
     Returns None when the input is empty or unrecognized (caller uses default).
     Returns {"enabled": False} for "none".
     Returns {"enabled": True, "effort": <level>} for valid effort levels.
@@ -202,6 +202,8 @@ def parse_reasoning_effort(effort: str) -> dict | None:
     if not effort or not effort.strip():
         return None
     effort = effort.strip().lower()
+    if effort == "auto":
+        return {"enabled": True, "effort": "auto", "auto": True}
     if effort == "none":
         return {"enabled": False}
     if effort in VALID_REASONING_EFFORTS:

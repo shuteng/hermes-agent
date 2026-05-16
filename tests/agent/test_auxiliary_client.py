@@ -1342,6 +1342,23 @@ class TestKimiTemperatureOmitted:
         assert "temperature" not in kwargs
 
 
+
+class TestGPT55TemperatureOmitted:
+    def test_gpt55_auxiliary_call_omits_temperature(self):
+        """GPT-5.5 Codex-compatible auxiliary calls reject explicit temperature."""
+        from agent.auxiliary_client import _build_call_kwargs
+
+        kwargs = _build_call_kwargs(
+            provider="openai-codex",
+            model="gpt-5.5",
+            messages=[{"role": "user", "content": "hello"}],
+            temperature=0.3,
+            base_url="https://chatgpt.com/backend-api/codex",
+        )
+
+        assert "temperature" not in kwargs
+
+
 # ---------------------------------------------------------------------------
 # async_call_llm payment / connection fallback (#7512 bug 2)
 # ---------------------------------------------------------------------------

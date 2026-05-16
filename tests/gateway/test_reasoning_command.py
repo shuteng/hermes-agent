@@ -104,6 +104,54 @@ class TestReasoningCommand:
         assert runner._reasoning_config == {"enabled": False}
         assert runner._show_reasoning is True
 
+
+    @pytest.mark.asyncio
+    async def test_handle_reasoning_command_accepts_auto_session_override(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text("agent:\n  reasoning_effort: medium\n", encoding="utf-8")
+
+        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+
+        runner = _make_runner()
+        event = _make_event("/reasoning auto")
+        session_key = runner._session_key_for_source(event.source)
+
+        result = await runner._handle_reasoning_command(event)
+
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["agent"]["reasoning_effort"] == "medium"
+        assert runner._session_reasoning_overrides[session_key] == {
+            "enabled": True,
+            "effort": "auto",
+            "auto": True,
+        }
+        assert "auto" in result
+
+    def test_auto_reasoning_router_uses_xhigh_for_live_trading_questions(self):
+        decision = gateway_run.GatewayRunner._auto_reasoning_decision(
+            "TWTS 實盤 Shioaji 下單 partial fill race condition 要怎麼修？"
+        )
+
+        assert decision == {"enabled": True, "effort": "xhigh", "auto_reason": "TWTS/live-trading"}
+
+    def test_auto_reasoning_router_uses_high_for_research_planning_questions(self):
+        decision = gateway_run.GatewayRunner._auto_reasoning_decision("幫我研究規劃這個 Hermes effort 標註功能")
+
+        assert decision == {"enabled": True, "effort": "high", "auto_reason": "research/planning"}
+
+    def test_auto_reasoning_router_uses_low_for_simple_questions(self):
+        decision = gateway_run.GatewayRunner._auto_reasoning_decision("嗨")
+
+        assert decision == {"enabled": True, "effort": "low", "auto_reason": "simple"}
+
+    def test_format_effort_label_shows_fixed_and_auto_modes(self):
+        assert gateway_run.GatewayRunner._format_effort_label({"enabled": True, "effort": "high"}) == "[effort: high]"
+        assert gateway_run.GatewayRunner._format_effort_label(
+            {"enabled": True, "effort": "xhigh", "auto_reason": "TWTS/live-trading"}
+        ) == "[effort: xhigh | auto: TWTS/live-trading]"
+
     @pytest.mark.asyncio
     async def test_handle_reasoning_command_updates_config_and_cache(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / "hermes"
@@ -245,7 +293,7 @@ class TestReasoningCommand:
             )
         )
 
-        assert result["final_response"] == "ok"
+        assert result["final_response"] == "[effort: low]\nok"
         assert _CapturingAgent.last_init is not None
         assert _CapturingAgent.last_init["reasoning_config"] == {"enabled": True, "effort": "low"}
 
@@ -295,9 +343,57 @@ class TestReasoningCommand:
             )
         )
 
-        assert result["final_response"] == "ok"
+        assert result["final_response"] == "[effort: high]\nok"
         assert _CapturingAgent.last_init is not None
         assert _CapturingAgent.last_init["reasoning_config"] == {"enabled": True, "effort": "high"}
+
+
+    def test_run_agent_resolves_auto_reasoning_and_labels_response(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text("agent:\n  reasoning_effort: auto\n", encoding="utf-8")
+
+        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        monkeypatch.setattr(gateway_run, "_env_path", hermes_home / ".env")
+        monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            gateway_run,
+            "_resolve_runtime_agent_kwargs",
+            lambda: {
+                "provider": "openrouter",
+                "api_mode": "chat_completions",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "***",
+            },
+        )
+        fake_run_agent = types.ModuleType("run_agent")
+        fake_run_agent.AIAgent = _CapturingAgent
+        monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+        _CapturingAgent.last_init = None
+        runner = _make_runner()
+        source = SessionSource(
+            platform=Platform.LOCAL,
+            chat_id="cli",
+            chat_name="CLI",
+            chat_type="dm",
+            user_id="user-1",
+        )
+
+        result = asyncio.run(
+            runner._run_agent(
+                message="TWTS 實盤 Shioaji 下單 race condition",
+                context_prompt="",
+                history=[],
+                source=source,
+                session_id="session-1",
+                session_key="agent:main:local:dm",
+            )
+        )
+
+        expected = {"enabled": True, "effort": "xhigh", "auto_reason": "TWTS/live-trading"}
+        assert _CapturingAgent.last_init["reasoning_config"] == expected
+        assert result["final_response"] == "[effort: xhigh | auto: TWTS/live-trading]\nok"
 
     def test_run_agent_includes_enabled_mcp_servers_in_gateway_toolsets(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / "hermes"
@@ -352,7 +448,7 @@ class TestReasoningCommand:
             )
         )
 
-        assert result["final_response"] == "ok"
+        assert result["final_response"] == "[effort: medium]\nok"
         assert _CapturingAgent.last_init is not None
         enabled_toolsets = set(_CapturingAgent.last_init["enabled_toolsets"])
         assert "web" in enabled_toolsets
@@ -404,7 +500,7 @@ class TestReasoningCommand:
             )
         )
 
-        assert result["final_response"] == "ok"
+        assert result["final_response"] == "[effort: medium]\nok"
         assert _CapturingAgent.last_init is not None
         assert "homeassistant" in set(_CapturingAgent.last_init["enabled_toolsets"])
 

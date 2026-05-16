@@ -2375,6 +2375,73 @@ class GatewayRunner:
             return overrides[resolved_session_key]
         return self._load_reasoning_config()
 
+
+    @staticmethod
+    def _auto_reasoning_decision(user_message: Any) -> dict:
+        """Choose a per-turn reasoning effort using deterministic, conservative rules."""
+        if isinstance(user_message, list):
+            parts = []
+            for part in user_message:
+                if isinstance(part, dict):
+                    parts.append(str(part.get("text") or part.get("content") or ""))
+                else:
+                    parts.append(str(part))
+            text = "\n".join(parts)
+        else:
+            text = str(user_message or "")
+        lowered = text.lower()
+
+        live_trading_markers = (
+            "twts", "shioaji", "sinopac", "永豐", "實盤", "正式下單",
+            "下單", "委託", "成交", "回報", "刪單", "改單", "風控",
+            "forced cover", "強制回補", "partial fill", "order state",
+            "race condition", "daytrade", "先賣後買", "庫存", "部位",
+        )
+        if any(marker in lowered for marker in live_trading_markers):
+            return {"enabled": True, "effort": "xhigh", "auto_reason": "TWTS/live-trading"}
+
+        coding_markers = (
+            "debug", "bug", "traceback", "pytest", "test fail", "failing test",
+            "實作", "修 bug", "錯誤", "報錯", "測試", "重構", "repo", "程式碼",
+            "commit", "git diff", "pull request", "review", "架構",
+        )
+        if any(marker in lowered for marker in coding_markers):
+            return {"enabled": True, "effort": "high", "auto_reason": "coding/debug"}
+
+        research_markers = (
+            "比較", "分析", "整理", "摘要", "評估", "規劃", "設計", "研究",
+            "why", "how", "tradeoff", "pros and cons",
+        )
+        if any(marker in lowered for marker in research_markers):
+            return {"enabled": True, "effort": "high", "auto_reason": "research/planning"}
+        if len(text) > 240:
+            return {"enabled": True, "effort": "medium", "auto_reason": "long-form"}
+
+        return {"enabled": True, "effort": "low", "auto_reason": "simple"}
+
+    @staticmethod
+    def _resolve_turn_reasoning_config(reasoning_config: Optional[dict], user_message: Any) -> Optional[dict]:
+        """Resolve fixed or auto reasoning config into the config sent to the model."""
+        if reasoning_config and reasoning_config.get("auto"):
+            return GatewayRunner._auto_reasoning_decision(user_message)
+        return reasoning_config
+
+    @staticmethod
+    def _format_effort_label(reasoning_config: Optional[dict]) -> str:
+        """Return a compact user-visible effort label for final responses."""
+        if reasoning_config is None:
+            effort = "medium"
+            reason = ""
+        elif reasoning_config.get("enabled") is False:
+            effort = "none"
+            reason = ""
+        else:
+            effort = str(reasoning_config.get("effort") or "medium")
+            reason = str(reasoning_config.get("auto_reason") or "")
+        if reason:
+            return f"[effort: {effort} | auto: {reason}]"
+        return f"[effort: {effort}]"
+
     def _set_session_reasoning_override(
         self,
         session_key: str,
@@ -10619,7 +10686,10 @@ class GatewayRunner:
 
             pr = self._provider_routing
             max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
-            reasoning_config = self._resolve_session_reasoning_config(source=source)
+            reasoning_config = self._resolve_turn_reasoning_config(
+                self._resolve_session_reasoning_config(source=source),
+                prompt,
+            )
             self._reasoning_config = reasoning_config
             self._service_tier = self._load_service_tier()
             turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
@@ -10837,7 +10907,9 @@ class GatewayRunner:
             self._reasoning_config = self._load_reasoning_config()
             self._evict_cached_agent(session_key)
             return t("gateway.reasoning.reset_done")
-        if effort == "none":
+        if effort == "auto":
+            parsed = {"enabled": True, "effort": "auto", "auto": True}
+        elif effort == "none":
             parsed = {"enabled": False}
         elif effort in {"minimal", "low", "medium", "high", "xhigh"}:
             parsed = {"enabled": True, "effort": effort}
@@ -15121,9 +15193,12 @@ class GatewayRunner:
                 }
 
             pr = self._provider_routing
-            reasoning_config = self._resolve_session_reasoning_config(
-                source=source,
-                session_key=session_key,
+            reasoning_config = self._resolve_turn_reasoning_config(
+                self._resolve_session_reasoning_config(
+                    source=source,
+                    session_key=session_key,
+                ),
+                message,
             )
             self._reasoning_config = reasoning_config
             self._service_tier = self._load_service_tier()
@@ -15735,6 +15810,8 @@ class GatewayRunner:
             
             # Return final response, or a message if something went wrong
             final_response = result.get("final_response")
+            if final_response and not str(final_response).lstrip().startswith("[effort:"):
+                final_response = f"{self._format_effort_label(reasoning_config)}\n{final_response}"
 
             # Extract actual token counts from the agent instance used for this run
             _last_prompt_toks = 0

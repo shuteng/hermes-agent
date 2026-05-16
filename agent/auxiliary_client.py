@@ -202,6 +202,12 @@ def _is_arcee_trinity_thinking(model: Optional[str]) -> bool:
     return bare == "trinity-large-thinking"
 
 
+def _is_gpt55_model(model: Optional[str]) -> bool:
+    """True for GPT-5.5 model aliases that reject explicit temperature."""
+    bare = (model or "").strip().lower().rsplit("/", 1)[-1]
+    return bare in {"gpt-5.5", "gpt-5-5"} or bare.startswith(("gpt-5.5-", "gpt-5-5-"))
+
+
 def _fixed_temperature_for_model(
     model: Optional[str],
     base_url: Optional[str] = None,
@@ -221,6 +227,9 @@ def _fixed_temperature_for_model(
         return OMIT_TEMPERATURE
     if _is_arcee_trinity_thinking(model):
         return 0.5
+    if _is_gpt55_model(model):
+        logger.debug("Omitting temperature for GPT-5.5 model %r (unsupported)", model)
+        return OMIT_TEMPERATURE
     return None
 
 
@@ -755,7 +764,7 @@ class _CodexCompletionsAdapter:
 
         def _check_cancelled() -> None:
             if deadline is not None and time.monotonic() >= deadline:
-                timed_out.set()
+                _close_client_on_timeout()
                 raise TimeoutError(_timeout_message())
             try:
                 from tools.interrupt import is_interrupted
