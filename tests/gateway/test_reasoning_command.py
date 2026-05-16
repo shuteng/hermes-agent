@@ -139,7 +139,43 @@ class TestReasoningCommand:
     def test_auto_reasoning_router_uses_high_for_research_planning_questions(self):
         decision = gateway_run.GatewayRunner._auto_reasoning_decision("幫我研究規劃這個 Hermes effort 標註功能")
 
-        assert decision == {"enabled": True, "effort": "high", "auto_reason": "research/planning"}
+        assert decision == {"enabled": True, "effort": "high", "auto_reason": "analysis/judgment"}
+
+    def test_auto_reasoning_router_uses_low_for_routine_status_checks(self):
+        assert gateway_run.GatewayRunner._auto_reasoning_decision("盤前有都正常嗎") == {
+            "enabled": True,
+            "effort": "low",
+            "auto_reason": "status/check",
+        }
+        assert gateway_run.GatewayRunner._auto_reasoning_decision("TWTS runtime 還活著嗎") == {
+            "enabled": True,
+            "effort": "low",
+            "auto_reason": "status/check",
+        }
+
+    def test_auto_reasoning_router_uses_medium_for_routine_summaries_and_daily_reviews(self):
+        assert gateway_run.GatewayRunner._auto_reasoning_decision("再給一次定錨筆記統整") == {
+            "enabled": True,
+            "effort": "medium",
+            "auto_reason": "routine-summary",
+        }
+        assert gateway_run.GatewayRunner._auto_reasoning_decision("盤點今日遇到的問題") == {
+            "enabled": True,
+            "effort": "medium",
+            "auto_reason": "routine-summary",
+        }
+
+    def test_auto_reasoning_router_escalates_routine_requests_when_judgment_is_requested(self):
+        assert gateway_run.GatewayRunner._auto_reasoning_decision("再給一次定錨筆記統整，並補你的多空判斷") == {
+            "enabled": True,
+            "effort": "high",
+            "auto_reason": "analysis/judgment",
+        }
+        assert gateway_run.GatewayRunner._auto_reasoning_decision("盤點今日遇到的問題，並分析根因與修復優先順序") == {
+            "enabled": True,
+            "effort": "high",
+            "auto_reason": "analysis/judgment",
+        }
 
     def test_auto_reasoning_router_uses_low_for_simple_questions(self):
         decision = gateway_run.GatewayRunner._auto_reasoning_decision("嗨")

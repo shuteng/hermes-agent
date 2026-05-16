@@ -258,6 +258,86 @@ def _parse_reasoning_config(effort: str) -> dict | None:
     return result
 
 
+def _auto_reasoning_decision(user_message: Any) -> dict:
+    """Choose a per-turn reasoning effort using deterministic, conservative rules."""
+    if isinstance(user_message, list):
+        parts = []
+        for part in user_message:
+            if isinstance(part, dict):
+                parts.append(str(part.get("text") or part.get("content") or ""))
+            else:
+                parts.append(str(part))
+        text = "\n".join(parts)
+    else:
+        text = str(user_message or "")
+    lowered = text.lower()
+
+    live_trading_markers = (
+        "正式下單", "下單", "委託", "成交", "回報", "刪單", "改單", "風控",
+        "forced cover", "強制回補", "partial fill", "order state",
+        "race condition", "daytrade", "先賣後買", "庫存", "部位", "超買", "超賣", "超掛",
+    )
+    if any(marker in lowered for marker in live_trading_markers):
+        return {"enabled": True, "effort": "xhigh", "auto_reason": "TWTS/live-trading"}
+
+    escalation_markers = (
+        "為什麼", "原因", "根因", "診斷", "修復", "修正", "優先順序", "計畫",
+        "風險", "判斷", "多空", "影響", "你怎麼看", "策略", "失敗", "錯誤", "報錯",
+        "why", "root cause", "diagnose", "fix", "risk", "impact", "priority",
+    )
+    status_markers = (
+        "正常嗎", "有跑嗎", "有都正常嗎", "目前狀況", "狀態如何", "還活著嗎",
+        "status", "cron", "排程", "gateway", "watchdog", "alive",
+    )
+    if any(marker in lowered for marker in status_markers) and not any(
+        marker in lowered for marker in escalation_markers
+    ):
+        return {"enabled": True, "effort": "low", "auto_reason": "status/check"}
+
+    routine_summary_markers = (
+        "再給一次", "重貼", "重新整理", "統整", "摘要", "整理一下",
+        "定錨筆記統整", "newsletter 統整", "盤點", "回顧", "列出今天",
+        "今日遇到的問題", "今天遇到的問題", "今天有哪些異常",
+    )
+    high_judgment_markers = (
+        "根因", "為什麼", "優先順序", "修復計畫", "風險", "判斷", "多空",
+        "影響", "比較", "你怎麼看", "策略", "分析原因", "決策", "tradeoff", "pros and cons",
+    )
+    if any(marker in lowered for marker in routine_summary_markers) and not any(
+        marker in lowered for marker in high_judgment_markers
+    ):
+        return {"enabled": True, "effort": "medium", "auto_reason": "routine-summary"}
+
+    coding_markers = (
+        "debug", "bug", "traceback", "pytest", "test fail", "failing test",
+        "實作", "修 bug", "錯誤", "報錯", "測試", "重構", "repo", "程式碼",
+        "commit", "git diff", "pull request", "review", "架構",
+    )
+    if any(marker in lowered for marker in coding_markers):
+        return {"enabled": True, "effort": "high", "auto_reason": "coding/debug"}
+
+    research_markers = (
+        "比較", "分析", "評估", "規劃", "設計", "研究", "判斷", "多空", "風險",
+        "why", "how", "tradeoff", "pros and cons",
+    )
+    if any(marker in lowered for marker in research_markers):
+        return {"enabled": True, "effort": "high", "auto_reason": "analysis/judgment"}
+    if len(text) > 240:
+        return {"enabled": True, "effort": "medium", "auto_reason": "long-form"}
+
+    return {"enabled": True, "effort": "low", "auto_reason": "simple"}
+
+
+def _resolve_turn_reasoning_config(reasoning_config: Optional[dict], user_message: Any) -> Optional[dict]:
+    """Resolve fixed or auto reasoning config into the config sent to the model."""
+    if reasoning_config and reasoning_config.get("auto"):
+        return _auto_reasoning_decision(user_message)
+    return reasoning_config
+
+
+_REASONING_OVERRIDE_UNSET = object()
+
+
 def _parse_service_tier_config(raw: str) -> str | None:
     """Parse a persisted service-tier preference into a Responses API value."""
     value = str(raw or "").strip().lower()
@@ -4347,7 +4427,14 @@ class HermesCLI:
         route["request_overrides"] = overrides
         return route
 
-    def _init_agent(self, *, model_override: str = None, runtime_override: dict = None, request_overrides: dict | None = None) -> bool:
+    def _init_agent(
+        self,
+        *,
+        model_override: str = None,
+        runtime_override: dict = None,
+        request_overrides: dict | None = None,
+        reasoning_config_override: object = _REASONING_OVERRIDE_UNSET,
+    ) -> bool:
         """
         Initialize the agent on first use.
         When resuming a session, restores conversation history from SQLite.
@@ -4435,6 +4522,14 @@ class HermesCLI:
                 "credential_pool": getattr(self, "_credential_pool", None),
             }
             effective_model = model_override or self.model
+            if reasoning_config_override is _REASONING_OVERRIDE_UNSET:
+                effective_reasoning_config = self.reasoning_config
+            else:
+                effective_reasoning_config = (
+                    reasoning_config_override
+                    if reasoning_config_override is None or isinstance(reasoning_config_override, dict)
+                    else self.reasoning_config
+                )
             self.agent = AIAgent(
                 model=effective_model,
                 api_key=runtime.get("api_key"),
@@ -4451,7 +4546,7 @@ class HermesCLI:
                 quiet_mode=not self.verbose,
                 ephemeral_system_prompt=self.system_prompt if self.system_prompt else None,
                 prefill_messages=self.prefill_messages or None,
-                reasoning_config=self.reasoning_config,
+                reasoning_config=effective_reasoning_config,
                 service_tier=self.service_tier,
                 request_overrides=request_overrides,
                 providers_allowed=self._providers_only,
@@ -8112,6 +8207,7 @@ class HermesCLI:
         _cprint("  You can continue chatting — results will appear when done.\n")
 
         turn_route = self._resolve_turn_agent_config(prompt)
+        turn_reasoning_config = _resolve_turn_reasoning_config(self.reasoning_config, prompt)
 
         def run_background():
             set_sudo_password_callback(self._sudo_password_callback)
@@ -8136,7 +8232,7 @@ class HermesCLI:
                     session_id=task_id,
                     platform="cli",
                     session_db=self._session_db,
-                    reasoning_config=self.reasoning_config,
+                    reasoning_config=turn_reasoning_config,
                     service_tier=self.service_tier,
                     request_overrides=turn_route.get("request_overrides"),
                     providers_allowed=self._providers_only,
@@ -8901,7 +8997,7 @@ class HermesCLI:
 
         Usage:
             /reasoning              Show current effort level and display state
-            /reasoning <level>      Set reasoning effort (none, minimal, low, medium, high, xhigh)
+            /reasoning <level>      Set reasoning effort (none, auto, minimal, low, medium, high, xhigh)
             /reasoning show|on      Show model thinking/reasoning in output
             /reasoning hide|off     Hide model thinking/reasoning from output
         """
@@ -8919,7 +9015,7 @@ class HermesCLI:
             display_state = "on ✓" if self.show_reasoning else "off"
             _cprint(f"  {_ACCENT}Reasoning effort:  {level}{_RST}")
             _cprint(f"  {_ACCENT}Reasoning display: {display_state}{_RST}")
-            _cprint(f"  {_DIM}Usage: /reasoning <none|minimal|low|medium|high|xhigh|show|hide>{_RST}")
+            _cprint(f"  {_DIM}Usage: /reasoning <none|auto|minimal|low|medium|high|xhigh|show|hide>{_RST}")
             return
 
         arg = parts[1].strip().lower()
@@ -8945,7 +9041,7 @@ class HermesCLI:
         parsed = _parse_reasoning_config(arg)
         if parsed is None:
             _cprint(f"  {_DIM}(._.) Unknown argument: {arg}{_RST}")
-            _cprint(f"  {_DIM}Valid levels: none, minimal, low, medium, high, xhigh{_RST}")
+            _cprint(f"  {_DIM}Valid levels: none, auto, minimal, low, medium, high, xhigh{_RST}")
             _cprint(f"  {_DIM}Display:      show, hide{_RST}")
             return
 
@@ -10705,6 +10801,7 @@ class HermesCLI:
             return None
 
         turn_route = self._resolve_turn_agent_config(message)
+        turn_reasoning_config = _resolve_turn_reasoning_config(self.reasoning_config, message)
         if turn_route["signature"] != self._active_agent_route_signature:
             self.agent = None
 
@@ -10715,8 +10812,11 @@ class HermesCLI:
             model_override=turn_route["model"],
             runtime_override=turn_route["runtime"],
             request_overrides=turn_route.get("request_overrides"),
+            reasoning_config_override=turn_reasoning_config,
         ):
             return None
+        if self.agent is not None:
+            self.agent.reasoning_config = turn_reasoning_config
         
         # Route image attachments based on the active model's vision capability.
         # "native" → pass pixels as OpenAI-style content parts (adapters
@@ -14085,15 +14185,18 @@ def main(
                         announce=False,
                     )
                 turn_route = cli._resolve_turn_agent_config(effective_query)
+                turn_reasoning_config = _resolve_turn_reasoning_config(cli.reasoning_config, effective_query)
                 if turn_route["signature"] != cli._active_agent_route_signature:
                     cli.agent = None
                 if cli._init_agent(
                     model_override=turn_route["model"],
                     runtime_override=turn_route["runtime"],
                     request_overrides=turn_route.get("request_overrides"),
+                    reasoning_config_override=turn_reasoning_config,
                 ):
                     cli.agent.quiet_mode = True
                     cli.agent.suppress_status_output = True
+                    cli.agent.reasoning_config = turn_reasoning_config
                     # Suppress streaming display callbacks so stdout stays
                     # machine-readable (no styled "Hermes" box, no tool-gen
                     # status lines).  The response is printed once below.

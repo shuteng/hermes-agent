@@ -2392,13 +2392,40 @@ class GatewayRunner:
         lowered = text.lower()
 
         live_trading_markers = (
-            "twts", "shioaji", "sinopac", "永豐", "實盤", "正式下單",
-            "下單", "委託", "成交", "回報", "刪單", "改單", "風控",
+            "正式下單", "下單", "委託", "成交", "回報", "刪單", "改單", "風控",
             "forced cover", "強制回補", "partial fill", "order state",
-            "race condition", "daytrade", "先賣後買", "庫存", "部位",
+            "race condition", "daytrade", "先賣後買", "庫存", "部位", "超買", "超賣", "超掛",
         )
         if any(marker in lowered for marker in live_trading_markers):
             return {"enabled": True, "effort": "xhigh", "auto_reason": "TWTS/live-trading"}
+
+        escalation_markers = (
+            "為什麼", "原因", "根因", "診斷", "修復", "修正", "優先順序", "計畫",
+            "風險", "判斷", "多空", "影響", "你怎麼看", "策略", "失敗", "錯誤", "報錯",
+            "why", "root cause", "diagnose", "fix", "risk", "impact", "priority",
+        )
+        status_markers = (
+            "正常嗎", "有跑嗎", "有都正常嗎", "目前狀況", "狀態如何", "還活著嗎",
+            "status", "cron", "排程", "gateway", "watchdog", "alive",
+        )
+        if any(marker in lowered for marker in status_markers) and not any(
+            marker in lowered for marker in escalation_markers
+        ):
+            return {"enabled": True, "effort": "low", "auto_reason": "status/check"}
+
+        routine_summary_markers = (
+            "再給一次", "重貼", "重新整理", "統整", "摘要", "整理一下",
+            "定錨筆記統整", "newsletter 統整", "盤點", "回顧", "列出今天",
+            "今日遇到的問題", "今天遇到的問題", "今天有哪些異常",
+        )
+        high_judgment_markers = (
+            "根因", "為什麼", "優先順序", "修復計畫", "風險", "判斷", "多空",
+            "影響", "比較", "你怎麼看", "策略", "分析原因", "決策", "tradeoff", "pros and cons",
+        )
+        if any(marker in lowered for marker in routine_summary_markers) and not any(
+            marker in lowered for marker in high_judgment_markers
+        ):
+            return {"enabled": True, "effort": "medium", "auto_reason": "routine-summary"}
 
         coding_markers = (
             "debug", "bug", "traceback", "pytest", "test fail", "failing test",
@@ -2409,11 +2436,11 @@ class GatewayRunner:
             return {"enabled": True, "effort": "high", "auto_reason": "coding/debug"}
 
         research_markers = (
-            "比較", "分析", "整理", "摘要", "評估", "規劃", "設計", "研究",
+            "比較", "分析", "評估", "規劃", "設計", "研究", "判斷", "多空", "風險",
             "why", "how", "tradeoff", "pros and cons",
         )
         if any(marker in lowered for marker in research_markers):
-            return {"enabled": True, "effort": "high", "auto_reason": "research/planning"}
+            return {"enabled": True, "effort": "high", "auto_reason": "analysis/judgment"}
         if len(text) > 240:
             return {"enabled": True, "effort": "medium", "auto_reason": "long-form"}
 
