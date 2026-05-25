@@ -7812,9 +7812,16 @@ class AIAgent:
         # httpx timeout (default 1800s) with zero feedback.  The stale
         # detector kills the connection early so the main retry loop can
         # apply richer recovery (credential rotation, provider fallback).
-        _stale_timeout = self._compute_non_stream_stale_timeout(
-            api_kwargs.get("messages", [])
-        )
+        _stale_payload = api_kwargs.get("messages")
+        if not _stale_payload:
+            _stale_payload = []
+            _instructions = api_kwargs.get("instructions")
+            if _instructions:
+                _stale_payload.append({"role": "system", "content": _instructions})
+            _responses_input = api_kwargs.get("input")
+            if _responses_input:
+                _stale_payload.append({"role": "user", "content": _responses_input})
+        _stale_timeout = self._compute_non_stream_stale_timeout(_stale_payload)
 
         _call_start = time.time()
         self._touch_activity("waiting for non-streaming API response")
@@ -7838,7 +7845,7 @@ class AIAgent:
             # arrives within the configured timeout.
             _elapsed = time.time() - _call_start
             if _elapsed > _stale_timeout:
-                _est_ctx = sum(len(str(v)) for v in api_kwargs.get("messages", [])) // 4
+                _est_ctx = sum(len(str(v)) for v in _stale_payload) // 4
                 logger.warning(
                     "Non-streaming API call stale for %.0fs (threshold %.0fs). "
                     "model=%s context=~%s tokens. Killing connection.",

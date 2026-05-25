@@ -26,6 +26,17 @@ _TITLE_PROMPT = (
 )
 
 
+def _title_generation_disabled() -> bool:
+    """Return True when auxiliary.title_generation.provider disables titles."""
+    try:
+        from agent.auxiliary_client import _get_auxiliary_task_config
+
+        provider = str(_get_auxiliary_task_config("title_generation").get("provider", "")).strip().lower()
+        return provider in {"none", "disabled", "off", "false", "0"}
+    except Exception:
+        return False
+
+
 def generate_title(
     user_message: str,
     assistant_response: str,
@@ -44,6 +55,9 @@ def generate_title(
     ``AIAgent._emit_auxiliary_failure`` so the user sees a warning instead
     of silently accumulating untitled sessions.
     """
+    if _title_generation_disabled():
+        return None
+
     # Truncate long messages to keep the request small
     user_snippet = user_message[:500] if user_message else ""
     assistant_snippet = assistant_response[:500] if assistant_response else ""

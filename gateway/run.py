@@ -147,9 +147,9 @@ def _auto_continue_freshness_window() -> float:
     Reads ``HERMES_AUTO_CONTINUE_FRESHNESS`` (bridged from
     ``config.yaml`` ``agent.gateway_auto_continue_freshness`` at gateway
     startup, same pattern as ``HERMES_AGENT_TIMEOUT``).  Falls back to the
-    module default when unset or malformed.  Non-positive values disable
-    the freshness gate (restores the pre-fix "always fresh" behaviour for
-    users who want to opt out).
+    module default when unset or malformed.  ``0`` disables the freshness
+    gate (restores the pre-fix "always fresh" behaviour); negative values
+    disable gateway auto-continue entirely.
     """
     raw = os.environ.get("HERMES_AUTO_CONTINUE_FRESHNESS")
     if raw is None or raw == "":
@@ -187,15 +187,18 @@ def _is_fresh_gateway_interruption(
     legacy transcripts (pre-dating timestamp persistence) and with in-memory
     test scaffolding that constructs history entries without timestamps.
 
-    A non-positive ``window_secs`` disables the gate (always fresh), which
-    restores the pre-fix behaviour for users who opt out via config.
+    ``window_secs == 0`` disables the age gate (always fresh), which restores
+    the pre-fix behaviour for users who opt out via config.  Negative values
+    disable gateway auto-continue entirely for latency-sensitive deployments.
     """
     window = (
         float(window_secs)
         if window_secs is not None
         else float(_AUTO_CONTINUE_FRESHNESS_SECS_DEFAULT)
     )
-    if window <= 0:
+    if window < 0:
+        return False
+    if window == 0:
         return True
     timestamp = _coerce_gateway_timestamp(value)
     if timestamp is None:
@@ -3336,6 +3339,9 @@ class GatewayRunner:
         message, or on the next gateway startup.
         """
         window = _auto_continue_freshness_window()
+        if window < 0:
+            logger.info("Startup auto-resume disabled by gateway_auto_continue_freshness=%s", window)
+            return 0
         try:
             with self.session_store._lock:  # noqa: SLF001 — snapshot under lock
                 self.session_store._ensure_loaded_locked()  # noqa: SLF001

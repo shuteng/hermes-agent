@@ -124,7 +124,7 @@ def _simulate_note_injection(
     window = (
         float(window_secs)
         if window_secs is not None
-        else _auto_continue_freshness_window()
+        else 3600.0
     )
     interruption_is_fresh = _is_fresh_gateway_interruption(
         _last_transcript_timestamp(history),
@@ -711,9 +711,12 @@ class TestFreshnessHelpers:
         assert _is_fresh_gateway_interruption(
             0.0, now=1_700_000_000.0, window_secs=0,
         ) is True
+
+    def test_is_fresh_negative_window_disables_auto_continue(self):
+        """Negative windows are an operator kill switch for auto-continue."""
         assert _is_fresh_gateway_interruption(
             -1.0, now=1_700_000_000.0, window_secs=-5,
-        ) is True
+        ) is False
 
     def test_last_transcript_timestamp_skips_meta(self):
         history = [
@@ -934,12 +937,13 @@ async def test_drain_timeout_skips_pending_sentinel_sessions():
 
 
 @pytest.mark.asyncio
-async def test_startup_auto_resume_schedules_fresh_pending_sessions():
+async def test_startup_auto_resume_schedules_fresh_pending_sessions(monkeypatch):
     """Fresh resume_pending sessions should continue automatically after startup.
 
     This closes the UX gap where restart recovery only happened if the user sent
     another message after the gateway came back.
     """
+    monkeypatch.delenv("HERMES_AUTO_CONTINUE_FRESHNESS", raising=False)
     runner, adapter = make_restart_runner()
     source = make_restart_source(chat_id="resume-chat", thread_id="topic-1")
     pending_entry = SessionEntry(
@@ -974,7 +978,7 @@ async def test_startup_auto_resume_schedules_fresh_pending_sessions():
 
 
 @pytest.mark.asyncio
-async def test_startup_auto_resume_includes_crash_recovery():
+async def test_startup_auto_resume_includes_crash_recovery(monkeypatch):
     """Crash-recovered sessions (reason=restart_interrupted) are also auto-resumed.
 
     suspend_recently_active() marks in-flight sessions with resume_reason
@@ -982,6 +986,7 @@ async def test_startup_auto_resume_includes_crash_recovery():
     (crash/SIGKILL/OOM).  These should get the same magic continuation as
     drain-timeout interruptions.
     """
+    monkeypatch.delenv("HERMES_AUTO_CONTINUE_FRESHNESS", raising=False)
     runner, adapter = make_restart_runner()
     source = make_restart_source(chat_id="crash-chat")
     pending_entry = SessionEntry(
@@ -1006,9 +1011,36 @@ async def test_startup_auto_resume_includes_crash_recovery():
     adapter.handle_message.assert_awaited_once()
 
 
+def test_startup_auto_resume_can_be_disabled(monkeypatch):
+    """Negative freshness disables proactive startup auto-resume."""
+    monkeypatch.setenv("HERMES_AUTO_CONTINUE_FRESHNESS", "-1")
+    runner, adapter = make_restart_runner()
+    source = make_restart_source(chat_id="disabled-chat")
+    pending_entry = SessionEntry(
+        session_key="agent:main:telegram:dm:disabled-chat",
+        session_id="sid",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        origin=source,
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        resume_pending=True,
+        resume_reason="restart_timeout",
+        last_resume_marked_at=datetime.now(),
+    )
+    runner.session_store._entries = {pending_entry.session_key: pending_entry}
+    adapter.handle_message = AsyncMock()
+
+    scheduled = runner._schedule_resume_pending_sessions()
+
+    assert scheduled == 0
+    adapter.handle_message.assert_not_called()
+
+
 @pytest.mark.asyncio
-async def test_startup_auto_resume_skips_stale_entries():
+async def test_startup_auto_resume_skips_stale_entries(monkeypatch):
     """Entries older than the freshness window must not be auto-resumed."""
+    monkeypatch.delenv("HERMES_AUTO_CONTINUE_FRESHNESS", raising=False)
     runner, adapter = make_restart_runner()
     source = make_restart_source(chat_id="stale-chat")
     stale_marker = datetime.now() - timedelta(

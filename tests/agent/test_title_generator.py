@@ -12,6 +12,13 @@ from agent.title_generator import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _title_generation_enabled_by_default():
+    """Keep tests isolated from the operator's local auxiliary config."""
+    with patch("agent.auxiliary_client._get_auxiliary_task_config", return_value={"provider": "auto"}):
+        yield
+
+
 class TestGenerateTitle:
     """Unit tests for generate_title()."""
 
@@ -63,6 +70,14 @@ class TestGenerateTitle:
     def test_returns_none_on_exception(self):
         with patch("agent.title_generator.call_llm", side_effect=RuntimeError("no provider")):
             assert generate_title("question", "answer") is None
+
+    def test_disabled_provider_skips_llm_call(self):
+        with (
+            patch("agent.auxiliary_client._get_auxiliary_task_config", return_value={"provider": "none"}),
+            patch("agent.title_generator.call_llm") as call_llm,
+        ):
+            assert generate_title("question", "answer") is None
+            call_llm.assert_not_called()
 
     def test_invokes_failure_callback_on_exception(self):
         """failure_callback must fire so the user sees a warning (issue #15775)."""
