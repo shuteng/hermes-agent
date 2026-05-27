@@ -176,6 +176,26 @@ class _FakeResponsesStream:
         return self._final_response
 
 
+class _FakeResponsesStreamRaisesWhileIterating:
+    def __init__(self, events, exc):
+        self._events = list(events)
+        self._exc = exc
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def __iter__(self):
+        for event in self._events:
+            yield event
+        raise self._exc
+
+    def get_final_response(self):
+        raise AssertionError("get_final_response should not be needed after SDK iterator failure")
+
+
 class _FakeCreateStream:
     def __init__(self, events):
         self._events = list(events)
@@ -483,6 +503,36 @@ def test_run_codex_stream_fallback_parses_create_stream_events(monkeypatch):
     assert calls["create"] == 1
     assert create_stream.closed is True
     assert response.output[0].content[0].text == "streamed create ok"
+
+
+def test_run_codex_stream_recovers_from_sdk_none_output_parse_error(monkeypatch):
+    """ChatGPT Codex can stream valid output_item.done events, then send a
+    terminal response.completed payload with null/missing output. openai-python
+    raises TypeError("'NoneType' object is not iterable") while parsing that
+    terminal payload; Hermes should use the already-collected stream output.
+    """
+    agent = _build_agent(monkeypatch)
+    output_item = SimpleNamespace(
+        type="message",
+        role="assistant",
+        status="completed",
+        content=[SimpleNamespace(type="output_text", text="OK")],
+    )
+    stream = _FakeResponsesStreamRaisesWhileIterating(
+        [
+            SimpleNamespace(type="response.output_item.done", item=output_item),
+        ],
+        TypeError("'NoneType' object is not iterable"),
+    )
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(stream=lambda **kwargs: stream)
+    )
+
+    response = agent._run_codex_stream(_codex_request_kwargs())
+
+    assert response.status == "completed"
+    assert response.output == [output_item]
 
 
 def test_run_conversation_codex_plain_text(monkeypatch):

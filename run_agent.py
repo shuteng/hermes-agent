@@ -7102,6 +7102,37 @@ class AIAgent:
         # returns empty output (e.g. chatgpt.com backend-api sends
         # response.incomplete instead of response.completed).
         self._codex_streamed_text_parts: list = []
+
+        def _response_from_stream_backfill(reason: str):
+            if collected_output_items:
+                logger.debug(
+                    "Codex stream: recovered from %s with %d collected output item(s)",
+                    reason, len(collected_output_items),
+                )
+                return SimpleNamespace(
+                    output=list(collected_output_items),
+                    status="completed",
+                    model=api_kwargs.get("model"),
+                )
+            if self._codex_streamed_text_parts and not has_tool_calls:
+                assembled = "".join(self._codex_streamed_text_parts)
+                logger.debug(
+                    "Codex stream: recovered from %s with %d text delta(s), %d chars",
+                    reason, len(self._codex_streamed_text_parts), len(assembled),
+                )
+                return SimpleNamespace(
+                    output=[SimpleNamespace(
+                        type="message",
+                        role="assistant",
+                        status="completed",
+                        content=[SimpleNamespace(type="output_text", text=assembled)],
+                    )],
+                    output_text=assembled,
+                    status="completed",
+                    model=api_kwargs.get("model"),
+                )
+            return None
+
         for attempt in range(max_stream_retries + 1):
             if self._interrupt_requested:
                 raise InterruptedError("Agent interrupted before Codex stream retry")
@@ -7196,6 +7227,25 @@ class AIAgent:
                     exc,
                 )
                 return self._run_codex_create_stream_fallback(api_kwargs, client=active_client)
+            except TypeError as exc:
+                # The ChatGPT Codex backend can stream a valid response and then
+                # send a terminal response.completed payload whose `output` is
+                # null/missing. openai-python 2.32.0 raises inside
+                # parse_response(): TypeError("'NoneType' object is not
+                # iterable"), after Hermes has already collected
+                # response.output_item.done and/or output_text deltas. Recover
+                # from that SDK parsing bug; let unrelated TypeErrors surface.
+                if "'NoneType' object is not iterable" not in str(exc):
+                    raise
+                recovered = _response_from_stream_backfill("sdk-none-output")
+                if recovered is None:
+                    raise
+                logger.warning(
+                    "Codex Responses stream recovered from SDK terminal parse error "
+                    "using collected stream output. %s error=%s",
+                    self._client_log_context(), exc,
+                )
+                return recovered
             except RuntimeError as exc:
                 err_text = str(exc)
                 missing_completed = "response.completed" in err_text
